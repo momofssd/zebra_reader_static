@@ -12,6 +12,7 @@ let currentLabelIndex = 0;
 function createCodeReader() {
   const hints = new Map();
   hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
+  hints.set(ZXing.DecodeHintType.ALSO_INVERTED, true);
   hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [
     ZXing.BarcodeFormat.CODE_128,
     ZXing.BarcodeFormat.CODE_39,
@@ -26,6 +27,32 @@ function createCodeReader() {
     ZXing.BarcodeFormat.AZTEC,
   ]);
   return new ZXing.BrowserMultiFormatReader(hints);
+}
+
+function createAdditionalReaders() {
+  const hints = new Map();
+  hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
+  hints.set(ZXing.DecodeHintType.ALSO_INVERTED, true);
+
+  const readers = [];
+  if (typeof ZXing.BrowserQRCodeReader === "function") {
+    readers.push(new ZXing.BrowserQRCodeReader(hints));
+  }
+  if (typeof ZXing.BrowserDatamatrixCodeReader === "function") {
+    readers.push(new ZXing.BrowserDatamatrixCodeReader(hints));
+  }
+  if (typeof ZXing.BrowserPDF417Reader === "function") {
+    readers.push(new ZXing.BrowserPDF417Reader(hints));
+  }
+  if (typeof ZXing.BrowserAztecCodeReader === "function") {
+    readers.push(new ZXing.BrowserAztecCodeReader(hints));
+  }
+  return readers;
+}
+
+function getAllReaders() {
+  const readers = [createCodeReader()];
+  return readers.concat(createAdditionalReaders());
 }
 
 function loadImage(dataUrl) {
@@ -52,6 +79,227 @@ async function decodeWithUpscale(dataUrl, reader) {
     return reader.decodeFromCanvas(canvas);
   }
   return reader.decodeFromImageElement(img);
+}
+
+function pushUniqueResult(result, bucket) {
+  if (!result) return;
+  const key = `${result.getBarcodeFormat()}|${result.getText()}`;
+  if (!bucket.has(key)) {
+    bucket.set(key, result);
+  }
+}
+
+function cloneCanvas(source) {
+  const canvas = document.createElement("canvas");
+  canvas.width = source.width;
+  canvas.height = source.height;
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  ctx.drawImage(source, 0, 0);
+  return canvas;
+}
+
+function applyHighContrast(canvas) {
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  const data = imgData.data;
+  for (let i = 0; i < data.length; i += 4) {
+    const r = data[i];
+    const g = data[i + 1];
+    const b = data[i + 2];
+    const v = 0.299 * r + 0.587 * g + 0.114 * b;
+    const boosted = v < 128 ? 0 : 255;
+    data[i] = boosted;
+    data[i + 1] = boosted;
+    data[i + 2] = boosted;
+  }
+  ctx.putImageData(imgData, 0, 0);
+}
+
+function applyInvert(canvas) {
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  const data = imgData.data;
+  for (let i = 0; i < data.length; i += 4) {
+    data[i] = 255 - data[i];
+    data[i + 1] = 255 - data[i + 1];
+    data[i + 2] = 255 - data[i + 2];
+  }
+  ctx.putImageData(imgData, 0, 0);
+}
+
+function buildWholeImageVariants(canvas) {
+  const variants = [];
+  variants.push(canvas);
+  const highContrast = cloneCanvas(canvas);
+  applyHighContrast(highContrast);
+  variants.push(highContrast);
+  const inverted = cloneCanvas(highContrast);
+  applyInvert(inverted);
+  variants.push(inverted);
+  return variants;
+}
+
+function getBoundingBox(points) {
+  if (!points || points.length === 0) return null;
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  points.forEach((p) => {
+    const x = p.getX();
+    const y = p.getY();
+    if (x < minX) minX = x;
+    if (y < minY) minY = y;
+    if (x > maxX) maxX = x;
+    if (y > maxY) maxY = y;
+  });
+  return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
+}
+
+function maskResultArea(canvas, result) {
+  const points = result.getResultPoints();
+  const box = getBoundingBox(points);
+  if (!box) return false;
+  const pad = Math.max(12, Math.round(Math.max(box.w, box.h) * 0.25));
+  const x = Math.max(0, Math.floor(box.x - pad));
+  const y = Math.max(0, Math.floor(box.y - pad));
+  const w = Math.min(canvas.width - x, Math.ceil(box.w + pad * 2));
+  const h = Math.min(canvas.height - y, Math.ceil(box.h + pad * 2));
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(x, y, w, h);
+  return true;
+}
+
+async function tryDecodeWholeCanvas(canvas, reader) {
+  if (typeof reader.decodeMultipleFromCanvas === "function") {
+    return reader.decodeMultipleFromCanvas(canvas);
+  }
+  if (typeof reader.decodeFromCanvas === "function") {
+    return [await reader.decodeFromCanvas(canvas)];
+  }
+  const dataUrl = canvas.toDataURL("image/png");
+  const img = await loadImage(dataUrl);
+  if (typeof reader.decodeMultipleFromImageElement === "function") {
+    return reader.decodeMultipleFromImageElement(img);
+  }
+  return [await reader.decodeFromImageElement(img)];
+}
+
+async function decodeIteratively(canvas, reader, maxPasses = 8) {
+  const resultsMap = new Map();
+  const working = cloneCanvas(canvas);
+  for (let pass = 0; pass < maxPasses; pass += 1) {
+    let result = null;
+    try {
+      const resArr = await tryDecodeWholeCanvas(working, reader);
+      result = resArr && resArr.length > 0 ? resArr[0] : null;
+    } catch (_e) {
+      result = null;
+    }
+    if (!result) break;
+    pushUniqueResult(result, resultsMap);
+    const masked = maskResultArea(working, result);
+    if (!masked) break;
+  }
+  return Array.from(resultsMap.values());
+}
+
+function createCroppedCanvas(sourceCanvas, x, y, width, height) {
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, Math.round(width));
+  canvas.height = Math.max(1, Math.round(height));
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(
+    sourceCanvas,
+    x,
+    y,
+    width,
+    height,
+    0,
+    0,
+    canvas.width,
+    canvas.height,
+  );
+  return canvas;
+}
+
+async function decodeByTiling(canvas, reader, resultsMap) {
+  const minDim = Math.min(canvas.width, canvas.height);
+  const tileSize = Math.max(200, Math.round(minDim * 0.45));
+  const step = Math.max(120, Math.round(tileSize * 0.5));
+  let tiles = 0;
+  const maxTiles = 64;
+
+  for (let y = 0; y <= canvas.height - 1 && tiles < maxTiles; y += step) {
+    for (let x = 0; x <= canvas.width - 1 && tiles < maxTiles; x += step) {
+      const w = Math.min(tileSize, canvas.width - x);
+      const h = Math.min(tileSize, canvas.height - y);
+      const tile = createCroppedCanvas(canvas, x, y, w, h);
+      tiles += 1;
+      try {
+        const results = await tryDecodeWholeCanvas(tile, reader);
+        if (results && results.length > 0) {
+          results.forEach((res) => pushUniqueResult(res, resultsMap));
+        }
+      } catch (_e) {
+        // continue
+      }
+    }
+  }
+}
+
+async function decodeAllFromCanvas(canvas, reader) {
+  if (typeof reader.decodeMultipleFromCanvas === "function") {
+    return reader.decodeMultipleFromCanvas(canvas);
+  }
+
+  const resultsMap = new Map();
+  const variants = buildWholeImageVariants(canvas);
+  const readers = getAllReaders();
+  for (const variant of variants) {
+    for (const activeReader of readers) {
+      try {
+        const multi = await tryDecodeWholeCanvas(variant, activeReader);
+        if (multi && multi.length > 1) {
+          multi.forEach((res) => pushUniqueResult(res, resultsMap));
+          continue;
+        }
+        const iterResults = await decodeIteratively(variant, activeReader);
+        if (iterResults.length > 0) {
+          iterResults.forEach((res) => pushUniqueResult(res, resultsMap));
+        } else if (multi && multi.length === 1) {
+          pushUniqueResult(multi[0], resultsMap);
+        }
+        if (resultsMap.size < 2) {
+          await decodeByTiling(variant, activeReader, resultsMap);
+        }
+      } catch (_e) {
+        // Try the next reader/variant
+      }
+    }
+  }
+
+  return Array.from(resultsMap.values());
+}
+
+async function decodeAllFromDataUrl(dataUrl, reader) {
+  const img = await loadImage(dataUrl);
+  const minTarget = 2000;
+  const scale = Math.max(1, minTarget / Math.min(img.width, img.height));
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.round(img.width * scale);
+  canvas.height = Math.round(img.height * scale);
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+
+  if (typeof reader.decodeMultipleFromCanvas === "function") {
+    return reader.decodeMultipleFromCanvas(canvas);
+  }
+
+  return decodeAllFromCanvas(canvas, reader);
 }
 
 async function decodeCanvas(canvas, reader) {
@@ -142,7 +390,7 @@ async function readFileBarcodesButton() {
       // For simplicity, we'll process all pages
       for (let i = 1; i <= pdf.numPages; i++) {
         const page = await pdf.getPage(i);
-        const viewport = page.getViewport({ scale: 2.0 });
+        const viewport = page.getViewport({ scale: 5.0 });
         const canvas = document.createElement("canvas");
         const context = canvas.getContext("2d");
         canvas.height = viewport.height;
@@ -178,21 +426,25 @@ async function readFileBarcodesButton() {
     for (const item of imagesToScan) {
       try {
         const results = item.canvas
-          ? await decodeCanvas(item.canvas, codeReader)
-          : await decodeWithUpscale(item.dataUrl, codeReader);
-        if (results) {
-          const barcode = {
-            data: results.getText(),
-            type: results.getBarcodeFormat(),
-            page: item.page,
-            location: {
-              x: results.getResultPoints()[0].getX(),
-              y: results.getResultPoints()[0].getY(),
-              width: "?",
-              height: "?",
-            },
-          };
-          allBarcodes.push(barcode);
+          ? await decodeAllFromCanvas(item.canvas, codeReader)
+          : await decodeAllFromDataUrl(item.dataUrl, codeReader);
+        if (results && results.length > 0) {
+          results.forEach((res) => {
+            const points = res.getResultPoints();
+            const firstPoint = points && points.length > 0 ? points[0] : null;
+            const barcode = {
+              data: res.getText(),
+              type: res.getBarcodeFormat(),
+              page: item.page,
+              location: {
+                x: firstPoint ? firstPoint.getX() : "?",
+                y: firstPoint ? firstPoint.getY() : "?",
+                width: "?",
+                height: "?",
+              },
+            };
+            allBarcodes.push(barcode);
+          });
         }
       } catch (e) {
         console.log("No barcode on page", item.page, e);
@@ -289,20 +541,22 @@ async function readBarcodes() {
 
   try {
     const codeReader = createCodeReader();
-    const result = await decodeWithUpscale(labelImage.src, codeReader);
+    const results = await decodeAllFromDataUrl(labelImage.src, codeReader);
 
-    if (result) {
+    if (results && results.length > 0) {
       barcodeList.innerHTML = "";
-      const barcodeItem = document.createElement("div");
-      barcodeItem.className = "barcode-item";
-      barcodeItem.innerHTML = `
+      results.forEach((res, index) => {
+        const barcodeItem = document.createElement("div");
+        barcodeItem.className = "barcode-item";
+        barcodeItem.innerHTML = `
                 <div class="barcode-header">
-                    <strong>Barcode 1</strong>
-                    <span class="barcode-type">${result.getBarcodeFormat()}</span>
+                    <strong>Barcode ${index + 1}</strong>
+                    <span class="barcode-type">${res.getBarcodeFormat()}</span>
                 </div>
-                <div class="barcode-data">${result.getText()}</div>
+                <div class="barcode-data">${res.getText()}</div>
             `;
-      barcodeList.appendChild(barcodeItem);
+        barcodeList.appendChild(barcodeItem);
+      });
     } else {
       barcodeList.innerHTML =
         '<div class="no-barcodes">No barcodes found in the label</div>';
@@ -578,20 +832,22 @@ async function readZebraBarcodes() {
   try {
     const currentLabel = generatedLabels[currentLabelIndex];
     const codeReader = createCodeReader();
-    const result = await decodeWithUpscale(currentLabel.image, codeReader);
+    const results = await decodeAllFromDataUrl(currentLabel.image, codeReader);
 
-    if (result) {
+    if (results && results.length > 0) {
       barcodeList.innerHTML = "";
-      const barcodeItem = document.createElement("div");
-      barcodeItem.className = "barcode-item";
-      barcodeItem.innerHTML = `
+      results.forEach((res, index) => {
+        const barcodeItem = document.createElement("div");
+        barcodeItem.className = "barcode-item";
+        barcodeItem.innerHTML = `
                 <div class="barcode-header">
-                    <strong>Barcode 1</strong>
-                    <span class="barcode-type">${result.getBarcodeFormat()}</span>
+                    <strong>Barcode ${index + 1}</strong>
+                    <span class="barcode-type">${res.getBarcodeFormat()}</span>
                 </div>
-                <div class="barcode-data">${result.getText()}</div>
+                <div class="barcode-data">${res.getText()}</div>
             `;
-      barcodeList.appendChild(barcodeItem);
+        barcodeList.appendChild(barcodeItem);
+      });
     } else {
       barcodeList.innerHTML =
         '<div class="no-barcodes">No barcodes found in the label</div>';
