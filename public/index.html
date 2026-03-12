@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Zebra Printer Label Viewer</title>
+    <link rel="stylesheet" href="style.css" />
+    <!-- Client-side libraries for static version -->
+    <script src="https://unpkg.com/@zxing/library@latest"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+  </head>
+  <body>
+    <div class="container">
+      <h1>Zebra Printer Label Viewer</h1>
+
+      <div class="main-grid">
+        <div class="input-section">
+          <div class="tabs">
+            <button class="tab-button active" onclick="switchTab('zpl')">
+              ZPL Code
+            </button>
+            <button class="tab-button" onclick="switchTab('file')">
+              Upload File
+            </button>
+            <button class="tab-button" onclick="switchTab('zebraFile')">
+              Zebra File Upload
+            </button>
+          </div>
+
+          <div id="zplTab" class="tab-content active">
+            <textarea id="zplInput" placeholder="Enter ZPL code here...">
+^xa^pw812^ll608^cfa,50^fo100,100^fdHello World^fs^fo100,200^by3^bcn,100,y,n^fd123456789012^fs^xz</textarea
+            >
+            <div class="button-group">
+              <button onclick="generateLabel()">Generate Label</button>
+              <button
+                id="downloadButton"
+                onclick="downloadLabel()"
+                style="display: none"
+              >
+                Download PNG
+              </button>
+              <button
+                id="readBarcodesButton"
+                onclick="readBarcodes()"
+                style="display: none"
+              >
+                Read Barcodes
+              </button>
+            </div>
+          </div>
+
+          <div id="fileTab" class="tab-content">
+            <div class="file-upload">
+              <input
+                type="file"
+                id="fileInput"
+                accept=".pdf,.png,.jpg,.jpeg"
+                onchange="handleFileUpload()"
+              />
+              <p class="file-info">Supported formats: PDF, PNG, JPG, JPEG</p>
+            </div>
+            <div class="button-group">
+              <button
+                id="readFileBarcodesButton"
+                onclick="readFileBarcodesButton()"
+                style="display: none"
+              >
+                Read Barcodes
+              </button>
+            </div>
+          </div>
+
+          <div id="zebraFileTab" class="tab-content">
+            <div class="file-upload">
+              <input
+                type="file"
+                id="zebraFileInput"
+                accept=".pdf"
+                onchange="handleZebraFileUpload()"
+              />
+              <p class="file-info">
+                Upload PDF containing ZPL code(s) - one per page
+              </p>
+            </div>
+            <div class="button-group">
+              <button
+                id="generateFromPdfButton"
+                onclick="generateLabelsFromPdf()"
+                style="display: none"
+              >
+                Generate Labels
+              </button>
+              <button
+                id="readZebraBarcodesButton"
+                onclick="readZebraBarcodes()"
+                style="display: none"
+              >
+                Read Barcodes
+              </button>
+              <button
+                id="downloadAllLabelsButton"
+                onclick="downloadAllLabels()"
+                style="display: none"
+              >
+                Download All as PDF
+              </button>
+            </div>
+            <div
+              id="labelNavigation"
+              class="label-navigation"
+              style="display: none"
+            >
+              <button onclick="previousLabel()" id="prevLabelButton">
+                ← Previous
+              </button>
+              <span id="labelCounter">Label 1 of 1</span>
+              <button onclick="nextLabel()" id="nextLabelButton">Next →</button>
+            </div>
+          </div>
+          <p id="errorMessage" class="error"></p>
+        </div>
+
+        <div class="output-section">
+          <img id="labelImage" alt="Generated Label" style="display: none" />
+
+          <div
+            id="barcodeResults"
+            class="barcode-results"
+            style="display: none"
+          >
+            <h2>Barcode Reading Results</h2>
+            <div id="barcodeList"></div>
+            <p id="barcodeError" class="error"></p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <script src="script.js"></script>
+  </body>
+</html>
