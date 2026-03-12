@@ -498,7 +498,7 @@ async function generateLabel() {
 
   try {
     const response = await fetch(
-      "http://api.labelary.com/v1/printers/8dpmm/labels/4x6/0/",
+      "https://api.labelary.com/v1/printers/8dpmm/labels/4x6/0/",
       {
         method: "POST",
         headers: {
@@ -654,7 +654,7 @@ async function generateLabelsFromPdf() {
       if (text.toUpperCase().includes("^XA")) {
         const zpl = text.trim();
         const response = await fetch(
-          "http://api.labelary.com/v1/printers/8dpmm/labels/4x6/0/",
+          "https://api.labelary.com/v1/printers/8dpmm/labels/4x6/0/",
           {
             method: "POST",
             headers: {
@@ -719,7 +719,7 @@ async function generateLabelsFromPdf() {
       if (matches && matches.length > 0) {
         for (const zpl of matches) {
           const response = await fetch(
-            "http://api.labelary.com/v1/printers/8dpmm/labels/4x6/0/",
+            "https://api.labelary.com/v1/printers/8dpmm/labels/4x6/0/",
             {
               method: "POST",
               headers: {
