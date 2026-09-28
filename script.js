@@ -9,10 +9,88 @@ let zebraFile = null;
 let generatedLabels = [];
 let currentLabelIndex = 0;
 
+const barcodePrefixOrder = ["1J", "P", "Q", "V", "1T"];
+
+function getBarcodeRecordPrefix(record) {
+  return ["1J", "1T", "P", "Q", "V"].find((prefix) =>
+    record.startsWith(prefix),
+  );
+}
+
+function rearrangeBarcodeFieldData(data) {
+  const parts = data.split(/(\\?\*\/)/);
+  if (parts.length < 3) return data;
+
+  let trailer = "";
+  const trailerMatch = parts.at(-1).match(/(\\?\*<\\?\*[\r\n]*)$/);
+  if (trailerMatch) {
+    trailer = trailerMatch[1];
+    parts[parts.length - 1] = parts.at(-1).slice(0, -trailer.length);
+  }
+
+  const recordsByPrefix = new Map();
+  for (let index = 2; index < parts.length; index += 2) {
+    const prefix = getBarcodeRecordPrefix(parts[index]);
+    if (!prefix) continue;
+    if (recordsByPrefix.has(prefix)) return data;
+    recordsByPrefix.set(prefix, { index, record: parts[index] });
+  }
+
+  if (
+    recordsByPrefix.size !== barcodePrefixOrder.length ||
+    !barcodePrefixOrder.every((prefix) => recordsByPrefix.has(prefix))
+  ) {
+    return data;
+  }
+
+  const targetIndexes = [...recordsByPrefix.values()]
+    .map(({ index }) => index)
+    .sort((left, right) => left - right);
+  barcodePrefixOrder.forEach((prefix, position) => {
+    parts[targetIndexes[position]] = recordsByPrefix.get(prefix).record;
+  });
+
+  parts[parts.length - 1] += trailer;
+  return parts.join("");
+}
+
+function rearrangeBarcodeFields(zpl) {
+  const barcodeCounts = { Q: 0, X: 0 };
+  return zpl.replace(
+    /(\^B([QX])[^\^]*\^FD)(.*?)(\^FS)/gis,
+    (_, command, barcodeCommand, data, end) => {
+      const barcodeKey = barcodeCommand.toUpperCase();
+      const barcodeType = barcodeKey === "Q" ? "QR Code" : "Data Matrix";
+      barcodeCounts[barcodeKey] += 1;
+      const rearrangedData = rearrangeBarcodeFieldData(data);
+      if (rearrangedData !== data) {
+        console.log(
+          `${barcodeType} ${barcodeCounts[barcodeKey]} new contents:`,
+          rearrangedData,
+        );
+      }
+      return `${command}${rearrangedData}${end}`;
+    },
+  );
+}
+
+function logBarcodeContents(zpl, labelNumber) {
+  const barcodeCounts = { Q: 0, X: 0 };
+  zpl.replace(/\^B([QX])[^\^]*\^FD(.*?)\^FS/gis, (_, barcodeCommand, data) => {
+    const barcodeKey = barcodeCommand.toUpperCase();
+    const barcodeType = barcodeKey === "Q" ? "QR Code" : "Data Matrix";
+    barcodeCounts[barcodeKey] += 1;
+    console.log(
+      `Uploaded label ${labelNumber}, ${barcodeType} ${barcodeCounts[barcodeKey]} new contents:`,
+      data,
+    );
+    return _;
+  });
+}
+
 function createCodeReader() {
   const hints = new Map();
   hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
-  hints.set(ZXing.DecodeHintType.ALSO_INVERTED, true);
   hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [
     ZXing.BarcodeFormat.CODE_128,
     ZXing.BarcodeFormat.CODE_39,
@@ -29,32 +107,6 @@ function createCodeReader() {
   return new ZXing.BrowserMultiFormatReader(hints);
 }
 
-function createAdditionalReaders() {
-  const hints = new Map();
-  hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
-  hints.set(ZXing.DecodeHintType.ALSO_INVERTED, true);
-
-  const readers = [];
-  if (typeof ZXing.BrowserQRCodeReader === "function") {
-    readers.push(new ZXing.BrowserQRCodeReader(hints));
-  }
-  if (typeof ZXing.BrowserDatamatrixCodeReader === "function") {
-    readers.push(new ZXing.BrowserDatamatrixCodeReader(hints));
-  }
-  if (typeof ZXing.BrowserPDF417Reader === "function") {
-    readers.push(new ZXing.BrowserPDF417Reader(hints));
-  }
-  if (typeof ZXing.BrowserAztecCodeReader === "function") {
-    readers.push(new ZXing.BrowserAztecCodeReader(hints));
-  }
-  return readers;
-}
-
-function getAllReaders() {
-  const readers = [createCodeReader()];
-  return readers.concat(createAdditionalReaders());
-}
-
 function loadImage(dataUrl) {
   return new Promise((resolve, reject) => {
     const img = new Image();
@@ -62,23 +114,6 @@ function loadImage(dataUrl) {
     img.onerror = (e) => reject(e);
     img.src = dataUrl;
   });
-}
-
-async function decodeWithUpscale(dataUrl, reader) {
-  const img = await loadImage(dataUrl);
-  const minTarget = 900;
-  const scale = Math.max(1, minTarget / Math.min(img.width, img.height));
-  const canvas = document.createElement("canvas");
-  canvas.width = Math.round(img.width * scale);
-  canvas.height = Math.round(img.height * scale);
-  const ctx = canvas.getContext("2d", { willReadFrequently: true });
-  ctx.imageSmoothingEnabled = false;
-  ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-
-  if (typeof reader.decodeFromCanvas === "function") {
-    return reader.decodeFromCanvas(canvas);
-  }
-  return reader.decodeFromImageElement(img);
 }
 
 function pushUniqueResult(result, bucket) {
@@ -96,47 +131,6 @@ function cloneCanvas(source) {
   const ctx = canvas.getContext("2d", { willReadFrequently: true });
   ctx.drawImage(source, 0, 0);
   return canvas;
-}
-
-function applyHighContrast(canvas) {
-  const ctx = canvas.getContext("2d", { willReadFrequently: true });
-  const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-  const data = imgData.data;
-  for (let i = 0; i < data.length; i += 4) {
-    const r = data[i];
-    const g = data[i + 1];
-    const b = data[i + 2];
-    const v = 0.299 * r + 0.587 * g + 0.114 * b;
-    const boosted = v < 128 ? 0 : 255;
-    data[i] = boosted;
-    data[i + 1] = boosted;
-    data[i + 2] = boosted;
-  }
-  ctx.putImageData(imgData, 0, 0);
-}
-
-function applyInvert(canvas) {
-  const ctx = canvas.getContext("2d", { willReadFrequently: true });
-  const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-  const data = imgData.data;
-  for (let i = 0; i < data.length; i += 4) {
-    data[i] = 255 - data[i];
-    data[i + 1] = 255 - data[i + 1];
-    data[i + 2] = 255 - data[i + 2];
-  }
-  ctx.putImageData(imgData, 0, 0);
-}
-
-function buildWholeImageVariants(canvas) {
-  const variants = [];
-  variants.push(canvas);
-  const highContrast = cloneCanvas(canvas);
-  applyHighContrast(highContrast);
-  variants.push(highContrast);
-  const inverted = cloneCanvas(highContrast);
-  applyInvert(inverted);
-  variants.push(inverted);
-  return variants;
 }
 
 function getBoundingBox(points) {
@@ -172,37 +166,12 @@ function maskResultArea(canvas, result) {
 }
 
 async function tryDecodeWholeCanvas(canvas, reader) {
-  if (typeof reader.decodeMultipleFromCanvas === "function") {
-    return reader.decodeMultipleFromCanvas(canvas);
-  }
   if (typeof reader.decodeFromCanvas === "function") {
     return [await reader.decodeFromCanvas(canvas)];
   }
   const dataUrl = canvas.toDataURL("image/png");
   const img = await loadImage(dataUrl);
-  if (typeof reader.decodeMultipleFromImageElement === "function") {
-    return reader.decodeMultipleFromImageElement(img);
-  }
   return [await reader.decodeFromImageElement(img)];
-}
-
-async function decodeIteratively(canvas, reader, maxPasses = 8) {
-  const resultsMap = new Map();
-  const working = cloneCanvas(canvas);
-  for (let pass = 0; pass < maxPasses; pass += 1) {
-    let result = null;
-    try {
-      const resArr = await tryDecodeWholeCanvas(working, reader);
-      result = resArr && resArr.length > 0 ? resArr[0] : null;
-    } catch (_e) {
-      result = null;
-    }
-    if (!result) break;
-    pushUniqueResult(result, resultsMap);
-    const masked = maskResultArea(working, result);
-    if (!masked) break;
-  }
-  return Array.from(resultsMap.values());
 }
 
 function createCroppedCanvas(sourceCanvas, x, y, width, height) {
@@ -225,12 +194,31 @@ function createCroppedCanvas(sourceCanvas, x, y, width, height) {
   return canvas;
 }
 
+async function decodeIteratively(canvas, reader, maxPasses = 6) {
+  const resultsMap = new Map();
+  const working = cloneCanvas(canvas);
+  for (let pass = 0; pass < maxPasses; pass += 1) {
+    let result = null;
+    try {
+      const resArr = await tryDecodeWholeCanvas(working, reader);
+      result = resArr && resArr.length > 0 ? resArr[0] : null;
+    } catch (_e) {
+      result = null;
+    }
+    if (!result) break;
+    pushUniqueResult(result, resultsMap);
+    const masked = maskResultArea(working, result);
+    if (!masked) break;
+  }
+  return Array.from(resultsMap.values());
+}
+
 async function decodeByTiling(canvas, reader, resultsMap) {
   const minDim = Math.min(canvas.width, canvas.height);
-  const tileSize = Math.max(200, Math.round(minDim * 0.45));
-  const step = Math.max(120, Math.round(tileSize * 0.5));
+  const tileSize = Math.max(250, Math.round(minDim * 0.5));
+  const step = Math.max(150, Math.round(tileSize * 0.6));
   let tiles = 0;
-  const maxTiles = 64;
+  const maxTiles = 30;
 
   for (let y = 0; y <= canvas.height - 1 && tiles < maxTiles; y += step) {
     for (let x = 0; x <= canvas.width - 1 && tiles < maxTiles; x += step) {
@@ -251,33 +239,24 @@ async function decodeByTiling(canvas, reader, resultsMap) {
 }
 
 async function decodeAllFromCanvas(canvas, reader) {
-  if (typeof reader.decodeMultipleFromCanvas === "function") {
-    return reader.decodeMultipleFromCanvas(canvas);
+  const resultsMap = new Map();
+
+  // Try iterative decoding with masking
+  try {
+    const iterResults = await decodeIteratively(canvas, reader);
+    if (iterResults.length > 0) {
+      iterResults.forEach((res) => pushUniqueResult(res, resultsMap));
+    }
+  } catch (_e) {
+    // Continue to next strategy
   }
 
-  const resultsMap = new Map();
-  const variants = buildWholeImageVariants(canvas);
-  const readers = getAllReaders();
-  for (const variant of variants) {
-    for (const activeReader of readers) {
-      try {
-        const multi = await tryDecodeWholeCanvas(variant, activeReader);
-        if (multi && multi.length > 1) {
-          multi.forEach((res) => pushUniqueResult(res, resultsMap));
-          continue;
-        }
-        const iterResults = await decodeIteratively(variant, activeReader);
-        if (iterResults.length > 0) {
-          iterResults.forEach((res) => pushUniqueResult(res, resultsMap));
-        } else if (multi && multi.length === 1) {
-          pushUniqueResult(multi[0], resultsMap);
-        }
-        if (resultsMap.size < 2) {
-          await decodeByTiling(variant, activeReader, resultsMap);
-        }
-      } catch (_e) {
-        // Try the next reader/variant
-      }
+  // If we found fewer than 2 barcodes, try tiling to find more
+  if (resultsMap.size < 2) {
+    try {
+      await decodeByTiling(canvas, reader, resultsMap);
+    } catch (_e) {
+      // Continue
     }
   }
 
@@ -286,7 +265,7 @@ async function decodeAllFromCanvas(canvas, reader) {
 
 async function decodeAllFromDataUrl(dataUrl, reader) {
   const img = await loadImage(dataUrl);
-  const minTarget = 2000;
+  const minTarget = 1800;
   const scale = Math.max(1, minTarget / Math.min(img.width, img.height));
   const canvas = document.createElement("canvas");
   canvas.width = Math.round(img.width * scale);
@@ -294,10 +273,6 @@ async function decodeAllFromDataUrl(dataUrl, reader) {
   const ctx = canvas.getContext("2d", { willReadFrequently: true });
   ctx.imageSmoothingEnabled = false;
   ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-
-  if (typeof reader.decodeMultipleFromCanvas === "function") {
-    return reader.decodeMultipleFromCanvas(canvas);
-  }
 
   return decodeAllFromCanvas(canvas, reader);
 }
@@ -307,7 +282,8 @@ async function decodeCanvas(canvas, reader) {
     return reader.decodeFromCanvas(canvas);
   }
   const dataUrl = canvas.toDataURL("image/png");
-  return decodeWithUpscale(dataUrl, reader);
+  const img = await loadImage(dataUrl);
+  return reader.decodeFromImageElement(img);
 }
 
 function switchTab(tabName) {
@@ -390,7 +366,7 @@ async function readFileBarcodesButton() {
       // For simplicity, we'll process all pages
       for (let i = 1; i <= pdf.numPages; i++) {
         const page = await pdf.getPage(i);
-        const viewport = page.getViewport({ scale: 5.0 });
+        const viewport = page.getViewport({ scale: 3.5 });
         const canvas = document.createElement("canvas");
         const context = canvas.getContext("2d");
         canvas.height = viewport.height;
@@ -478,7 +454,9 @@ async function readFileBarcodesButton() {
 }
 
 async function generateLabel() {
-  const zplInput = document.getElementById("zplInput").value;
+  const zplElement = document.getElementById("zplInput");
+  const zplInput = rearrangeBarcodeFields(zplElement.value);
+  zplElement.value = zplInput;
   const labelImage = document.getElementById("labelImage");
   const errorMessage = document.getElementById("errorMessage");
   const downloadButton = document.getElementById("downloadButton");
@@ -652,7 +630,7 @@ async function generateLabelsFromPdf() {
       const text = textContent.items.map((item) => item.str).join(" ");
 
       if (text.toUpperCase().includes("^XA")) {
-        const zpl = text.trim();
+        const zpl = rearrangeBarcodeFields(text.trim());
         const response = await fetch(
           "https://api.labelary.com/v1/printers/8dpmm/labels/4x6/0/",
           {
@@ -717,7 +695,8 @@ async function generateLabelsFromPdf() {
       }
 
       if (matches && matches.length > 0) {
-        for (const zpl of matches) {
+        for (const extractedZpl of matches) {
+          const zpl = rearrangeBarcodeFields(extractedZpl);
           const response = await fetch(
             "https://api.labelary.com/v1/printers/8dpmm/labels/4x6/0/",
             {
@@ -749,6 +728,10 @@ async function generateLabelsFromPdf() {
     if (generatedLabels.length === 0) {
       throw new Error("No ZPL codes found in the PDF");
     }
+
+    generatedLabels.forEach((label, index) => {
+      logBarcodeContents(label.zpl, index + 1);
+    });
 
     currentLabelIndex = 0;
     displayCurrentLabel();
